@@ -8,7 +8,10 @@ const abiInterface = new Interface(marketPlaceArtifact);
 
 export async function createOnChainProduct(
   sellerAddress: string,
+  name: string,
+  description: string,
   priceInPHX: string,
+  imageURI: string,
 ) {
   const seller = getAddress(sellerAddress);
   const decimals = Number(PHX_TOKEN_DECIMALS);
@@ -18,15 +21,20 @@ export async function createOnChainProduct(
     throw new Error("Price must be greater than zero");
   }
 
-  if (!marketplace.interface.hasFunction("createProduct(address, uint256)")) {
+  const createProductSignature =
+    "createProduct(address,string,string,uint256,string)";
+  if (!marketplace.interface.hasFunction(createProductSignature)) {
     throw new Error(
       "The deployed ABI does not contain the expected createProduct function",
     );
   }
 
-  const tx = await marketplace.getFunction("createProduct(address, uint256)")(
+  const tx = await marketplace.getFunction(createProductSignature)(
     seller,
+    name,
+    description,
     price,
+    imageURI,
   );
 
   const receipt = await tx.wait();

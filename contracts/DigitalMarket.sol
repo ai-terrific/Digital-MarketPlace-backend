@@ -1,5 +1,4 @@
-
- // SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.34;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -11,17 +10,22 @@ contract DigitalMarketplace {
     address public immutable owner;
     IERC20 public immutable paymentToken;
 
-    uint256 public platformFeeBps = 500; // 5%
+    // Purchase fee: 500 basis points = 5%
+    uint256 public platformFeeBps = 500;
     uint256 public constant MAX_FEE_BPS = 1000; // 10%
+
+    // Dynamic product listing fee, denominated in PHX base units.
+    // For an 18-decimal PHX token, 25 PHX = 25 * 10**18.
+    uint256 public listingFee = 25 * 10**18;
 
     uint256 public nextProductId = 1;
 
     struct Product {
         string name;
         string description;
-        string imageURI; 
+        string imageURI;
         address currentOwner;
-        uint256 price;   
+        uint256 price;
         bool listed;
     }
 
@@ -69,7 +73,16 @@ contract DigitalMarketplace {
     );
 
     event Withdrawal(address indexed recipient, uint256 amount);
-    event PlatformFeeUpdated(uint256 oldFeeBps, uint256 newFeeBps);
+
+    event PlatformFeeUpdated(
+        uint256 oldFeeBps,
+        uint256 newFeeBps
+    );
+
+    event ListingFeeUpdated(
+        uint256 oldFee,
+        uint256 newFee
+    );
 
     modifier onlyOwner() {
         require(msg.sender == owner, "Not marketplace owner");
@@ -94,18 +107,56 @@ contract DigitalMarketplace {
         paymentToken = IERC20(phxTokenAddress);
     }
 
-    // Marketplace owner creates a product for its initial owner.
+    // =========================================
+    // ADMIN: Update dynamic listing fee
+    // =========================================
+
+    function setListingFee(uint256 newFee) external onlyOwner {
+        uint256 oldFee = listingFee;
+        listingFee = newFee;
+
+        emit ListingFeeUpdated(oldFee, newFee);
+    }
+
+    // =========================================
+    // ADMIN: Update purchase platform fee
+    // =========================================
+
+    function setPlatformFee(uint256 newFeeBps) external onlyOwner {
+        require(newFeeBps <= MAX_FEE_BPS, "Fee too high");
+
+        uint256 oldFeeBps = platformFeeBps;
+        platformFeeBps = newFeeBps;
+
+        emit PlatformFeeUpdated(oldFeeBps, newFeeBps);
+    }
+
+    // =========================================
+    // Create product
+    // =========================================
+
     function createProduct(
         address productOwner,
         string calldata name,
         string calldata description,
         uint256 price,
         string calldata imageURI
-    ) external returns (uint256 productId) {
+    ) external nonReentrant returns (uint256 productId) {
         require(productOwner != address(0), "Invalid product owner");
         require(bytes(name).length > 0, "Name required");
         require(price > 0, "Price must be positive");
         require(bytes(imageURI).length > 0, "Image URI required");
+
+        // Charge the CURRENT listing fee from the product owner's PHX.
+        if (listingFee > 0) {
+            paymentToken.safeTransferFrom(
+                productOwner,
+                address(this),
+                listingFee
+            );
+
+            pendingPlatformFees += listingFee;
+        }
 
         productId = nextProductId++;
 
@@ -129,7 +180,10 @@ contract DigitalMarketplace {
         );
     }
 
-    // Current product owner can update metadata.
+    // =========================================
+    // Update product details
+    // =========================================
+
     function updateProductDetails(
         uint256 productId,
         string calldata name,
@@ -149,7 +203,10 @@ contract DigitalMarketplace {
         emit ProductDetailsUpdated(productId);
     }
 
-    // Current owner can list or relist their product at a new price.
+    // =========================================
+    // List or relist product
+    // =========================================
+
     function listProduct(
         uint256 productId,
         uint256 price
@@ -166,7 +223,13 @@ contract DigitalMarketplace {
         emit ProductListed(productId, price);
     }
 
-    function buyProduct(uint256 productId) external nonReentrant {
+    // =========================================
+    // Buy product using PHX
+    // =========================================
+
+    function buyProduct(
+        uint256 productId
+    ) external nonReentrant {
         Product storage p = products[productId];
 
         require(p.currentOwner != address(0), "Product not found");
@@ -175,27 +238,46 @@ contract DigitalMarketplace {
 
         address seller = p.currentOwner;
         uint256 price = p.price;
-        uint256 fee = (price * platformFeeBps) / 10000;
-        uint256 sellerAmount = price - fee;
 
-        // Effects first; failed token transfers revert all changes.
+        uint256 fee = (price * platformFeeBps) / 10000;
+        uint256 payAmount = price + fee;
+
+        // Effects first. Any failed token transfer reverts these changes.
         p.currentOwner = msg.sender;
         p.listed = false;
 
-        pendingWithdrawals[seller] += sellerAmount;
-        pendingPlatformFees += fee;
-
+        // Buyer must approve the marketplace for payAmount PHX.
         paymentToken.safeTransferFrom(
             msg.sender,
             address(this),
-            price
+            payAmount
         );
 
-        emit ProductSold(productId, msg.sender, seller, price, fee);
-        emit OwnershipTransferred(productId, seller, msg.sender);
+        // Pay seller the product price.
+        paymentToken.safeTransfer(seller, price);
+
+        // Retain the platform purchase fee.
+        pendingPlatformFees += fee;
+
+        emit ProductSold(
+            productId,
+            msg.sender,
+            seller,
+            price,
+            fee
+        );
+
+        emit OwnershipTransferred(
+            productId,
+            seller,
+            msg.sender
+        );
     }
 
-    // Transfers product ownership without a product payment.
+    // =========================================
+    // Transfer ownership without payment
+    // =========================================
+
     function transferOwnership(
         uint256 productId,
         address newOwner
@@ -211,18 +293,30 @@ contract DigitalMarketplace {
         p.currentOwner = newOwner;
         p.listed = false;
 
-        emit OwnershipTransferred(productId, previousOwner, newOwner);
+        emit OwnershipTransferred(
+            productId,
+            previousOwner,
+            newOwner
+        );
     }
+
+    // =========================================
+    // Read product count
+    // =========================================
 
     function getProductCount() external view returns (uint256) {
         return productIds.length;
     }
 
-    // Fetch one product, including all display fields.
+    // =========================================
+    // Read one product
+    // =========================================
+
     function getProduct(
         uint256 productId
     ) external view returns (ProductDetails memory) {
         Product storage p = products[productId];
+
         require(p.currentOwner != address(0), "Product not found");
 
         return ProductDetails({
@@ -236,7 +330,10 @@ contract DigitalMarketplace {
         });
     }
 
-    // Fetch a page of products. start is zero-based.
+    // =========================================
+    // Read paginated products
+    // =========================================
+
     function getProducts(
         uint256 start,
         uint256 limit
@@ -247,12 +344,12 @@ contract DigitalMarketplace {
             return new ProductDetails[](0);
         }
 
-        uint256 end = start + limit;
-        if (end > total) {
-            end = total;
-        }
+        // Avoid overflow in start + limit.
+        uint256 remaining = total - start;
+        uint256 count = limit < remaining ? limit : remaining;
+        uint256 end = start + count;
 
-        result = new ProductDetails[](end - start);
+        result = new ProductDetails[](count);
 
         for (uint256 i = start; i < end; i++) {
             uint256 id = productIds[i];
@@ -270,32 +367,39 @@ contract DigitalMarketplace {
         }
     }
 
+    // =========================================
+    // Withdraw user balances
+    // =========================================
+
     function withdraw() external nonReentrant {
         uint256 amount = pendingWithdrawals[msg.sender];
+
         require(amount > 0, "Nothing to withdraw");
 
         pendingWithdrawals[msg.sender] = 0;
+
         paymentToken.safeTransfer(msg.sender, amount);
 
         emit Withdrawal(msg.sender, amount);
     }
 
-    function withdrawPlatformFees() external onlyOwner nonReentrant {
+    // =========================================
+    // Withdraw platform fees
+    // =========================================
+
+    function withdrawPlatformFees()
+        external
+        onlyOwner
+        nonReentrant
+    {
         uint256 amount = pendingPlatformFees;
+
         require(amount > 0, "No platform fees");
 
         pendingPlatformFees = 0;
+
         paymentToken.safeTransfer(owner, amount);
 
         emit Withdrawal(owner, amount);
-    }
-
-    function setPlatformFee(uint256 newFeeBps) external onlyOwner {
-        require(newFeeBps <= MAX_FEE_BPS, "Fee too high");
-
-        uint256 oldFeeBps = platformFeeBps;
-        platformFeeBps = newFeeBps;
-
-        emit PlatformFeeUpdated(oldFeeBps, newFeeBps);
     }
 }

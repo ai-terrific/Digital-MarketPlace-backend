@@ -142,6 +142,12 @@ npx hardhat ignition deploy ignition/modules/DigitalMarket.ts --network sepolia 
 
 The deployment script uses the `DigitalMarketplace` module and passes the token address expected by the contract.
 
+### Marketplace fees
+
+- The contract owner configures a fixed listing fee with `setListingFee(amount)`. The amount is denominated in the payment token's smallest units (for an 18-decimal token, `1 PHX = 10^18`).
+- Product owners must approve the marketplace contract to spend at least that fee before listing. The listing fee is charged once when the product is created.
+- Buyers pay the listed price plus the percentage platform fee, configured separately by the owner with `setPlatformFee(basisPoints)`, when purchasing a product. The default is 500 basis points (5%).
+
 ## Useful scripts
 
 ```bash

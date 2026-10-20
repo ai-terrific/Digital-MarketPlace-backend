@@ -45,7 +45,13 @@ export const listProduct = async (req: Request, res: Response) => {
     const imageURI = await uploadImage(file.buffer, file.originalname);
 
     // 2. Create the on-chain record.
-    const chainResult = await createOnChainProduct(sellerAddress, price);
+    const chainResult = await createOnChainProduct(
+      sellerAddress,
+      name.trim(),
+      description.trim(),
+      price,
+      imageURI,
+    );
 
     // 3. Save metadata in MongoDB.
     const product = await Product.create({
